@@ -1,8 +1,13 @@
 const express = require('express');
 const rateLimit = require('express-rate-limit');
 const axios = require('axios');
+const packageJson = require('./package.json');
 
 require('dotenv').config();
+
+function logWithTime(message) {
+  console.log(`[${new Date().toISOString()}] ${message}`);
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -73,15 +78,11 @@ app.get('/api/v1/test', (req, res) => {
   res.json({ message: 'Test endpoint working' });
 });
 
-app.get('/api/v1/user/me', (req, res) => {
-  res.json({
-    username: 'demo_trader',
-    joinDate: '2024-01-15T00:00:00.000Z',
-    accountTier: 'Starter'
-  });
+app.get('/api/v1/version', (req, res) => {
+  res.json({ version: packageJson.version });
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log(`Health check available at: http://localhost:${PORT}/health`);
+  logWithTime(`Server running on port ${PORT}`);
+  logWithTime(`Health check available at: http://localhost:${PORT}/health`);
 });
