@@ -2,6 +2,7 @@ const express = require('express');
 const rateLimit = require('express-rate-limit');
 const axios = require('axios');
 const packageJson = require('./package.json');
+const httpStatusCodes = require('./utils/httpStatusCodes');
 
 require('dotenv').config();
 
