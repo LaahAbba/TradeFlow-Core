@@ -1,6 +1,5 @@
 const express = require('express');
-const helmet = require('helmet');
-const cors = require('cors');
+
 require('dotenv').config();
 
 const app = express();
@@ -47,13 +46,7 @@ app.get('/api/transactions', (req, res) => {
     // 3. Slice the array to get the requested chunk
     const paginatedData = transactions.slice(startIndex, endIndex);
 
-    // 4. Return data with totalCount
-    res.json({
-        data: paginatedData,
-        totalCount: transactions.length,
-        page: page,
-        limit: limit
-    });
+
 });
 
 app.listen(port, () => {
