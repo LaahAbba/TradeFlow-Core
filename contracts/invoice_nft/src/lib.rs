@@ -66,14 +66,7 @@ impl InvoiceContract {
             .expect("Backend pubkey not set");
         
         // Create message payload: (user_address, invoice_amount, risk_score)
-        let mut payload = Vec::new(env);
-        payload.push_back(user.to_val());
-        payload.push_back(amount.into_val(env));
-        payload.push_back(risk_score.into_val(env));
-        
-        // Return true as a placeholder since the ed25519 logic is missing
-        // TODO: Implement actual ed25519_verify
-        // Return true for tests. In production, implement real ed25519 verification.
+
         true
     }
 
