@@ -32,6 +32,8 @@ pub enum DataKey {
     Loan(u64),    // Maps ID -> Loan
     LoanId,       // Tracks the next available loan ID
     BackendPubkey, // Backend public key for signature verification
+    WhitelistActive,
+    Whitelisted(Address),
 }
 
 #[contract]
@@ -48,6 +50,7 @@ impl LendingPool {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::TokenAddress, &token_address);
         env.storage().instance().set(&DataKey::Paused, &false);
+        env.storage().instance().set(&DataKey::WhitelistActive, &true);
     }
 
     // Helper function to check if contract is paused
@@ -70,6 +73,20 @@ impl LendingPool {
         env.events().publish((symbol_short!("pause_set"), paused), env.ledger().sequence());
     }
 
+    // SET WHITELIST ACTIVE: Toggle whitelist mechanism (admin only)
+    pub fn set_whitelist_active(env: Env, active: bool) {
+        Self::require_admin(&env);
+        env.storage().instance().set(&DataKey::WhitelistActive, &active);
+        Self::extend_storage_ttl(&env);
+    }
+
+    // ADD TO WHITELIST: Add address to approved LPs (admin only)
+    pub fn add_to_whitelist(env: Env, address: Address) {
+        Self::require_admin(&env);
+        env.storage().instance().set(&DataKey::Whitelisted(address), &true);
+        Self::extend_storage_ttl(&env);
+    }
+
     // GET PAUSE STATE: Check if contract is paused
     pub fn is_paused(env: Env) -> bool {
         env.storage().instance().get(&DataKey::Paused).unwrap_or(false)
@@ -79,6 +96,13 @@ impl LendingPool {
     pub fn deposit(env: Env, from: Address, amount: i128) {
         Self::check_paused(&env);
         from.require_auth();
+
+        // Check whitelist if active
+        if env.storage().instance().get(&DataKey::WhitelistActive).unwrap_or(false) {
+            if !env.storage().instance().has(&DataKey::Whitelisted(from.clone())) {
+                panic!("NOT_WHITELISTED");
+            }
+        }
 
         let token_addr: Address = env.storage().instance().get(&DataKey::TokenAddress).expect("Not initialized");
         let client = token::Client::new(&env, &token_addr);
