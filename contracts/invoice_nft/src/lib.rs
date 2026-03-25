@@ -1,4 +1,5 @@
 #![no_std]
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, Vec, Bytes, BytesN, Val, IntoVal};
 
 #[cfg(test)]
 mod tests;
@@ -62,11 +63,19 @@ impl InvoiceContract {
 
     // Helper function to verify backend signature
     fn verify_signature(env: &Env, user: &Address, amount: i128, risk_score: u32, signature: &BytesN<64>) -> bool {
+        // For now, we'll implement a simplified version
+        // In a real implementation, you'd use proper Ed25519 verification
         let backend_pubkey: BytesN<32> = env.storage().instance().get(&DataKey::BackendPubkey)
             .expect("Backend pubkey not set");
         
         // Create message payload: (user_address, invoice_amount, risk_score)
-
+        let mut payload: Vec<Val> = Vec::new(env);
+        payload.push_back(user.into_val(env));
+        payload.push_back(amount.into_val(env));
+        payload.push_back(risk_score.into_val(env));
+        
+        // For now, return true as a placeholder
+        // In production, you'd implement proper Ed25519 verification
         true
     }
 
