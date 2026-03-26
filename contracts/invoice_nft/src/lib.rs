@@ -1,4 +1,5 @@
 #![no_std]
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol, Vec, Bytes, BytesN, Val, IntoVal};
 
 #[cfg(test)]
 mod tests;
@@ -40,7 +41,7 @@ pub struct InvoiceContract;
 #[contractimpl]
 impl InvoiceContract {
     // Helper function to extend storage TTL
-    fn extend_storage_ttl(env: &Env) {
+    fn extend_instance_ttl(env: &Env) {
         // Extend TTL to 535,680 ledgers (approx 30 days)
         env.storage().instance().extend_ttl(535_680, 535_680);
     }
@@ -57,16 +58,24 @@ impl InvoiceContract {
         // For simplicity, we'll allow anyone to set this initially
         // In production, this should be admin-only
         env.storage().instance().set(&DataKey::BackendPubkey, &pubkey);
-        Self::extend_storage_ttl(&env);
+        Self::extend_instance_ttl(&env);
     }
 
     // Helper function to verify backend signature
     fn verify_signature(env: &Env, user: &Address, amount: i128, risk_score: u32, signature: &BytesN<64>) -> bool {
+        // For now, we'll implement a simplified version
+        // In a real implementation, you'd use proper Ed25519 verification
         let backend_pubkey: BytesN<32> = env.storage().instance().get(&DataKey::BackendPubkey)
             .expect("Backend pubkey not set");
         
         // Create message payload: (user_address, invoice_amount, risk_score)
-
+        let mut payload: Vec<Val> = Vec::new(env);
+        payload.push_back(user.into_val(env));
+        payload.push_back(amount.into_val(env));
+        payload.push_back(risk_score.into_val(env));
+        
+        // For now, return true as a placeholder
+        // In production, you'd implement proper Ed25519 verification
         true
     }
 
@@ -102,9 +111,10 @@ impl InvoiceContract {
         };
 
         // Save to storage
-        env.storage().instance().set(&DataKey::Invoice(current_id), &invoice);
+        env.storage().persistent().set(&DataKey::Invoice(current_id), &invoice);
+        env.storage().persistent().extend_ttl(&DataKey::Invoice(current_id), 535_680, 535_680);
         env.storage().instance().set(&DataKey::TokenId, &current_id);
-        Self::extend_storage_ttl(&env);
+        Self::extend_instance_ttl(&env);
 
         // Emit an event (so our API can see it later)
         env.events().publish((symbol_short!("mint"), owner), current_id);
@@ -114,22 +124,28 @@ impl InvoiceContract {
 
    // 2. GET: Read invoice details (throws error if not found)
     pub fn get_invoice(env: Env, id: u64) -> Invoice {
-        env.storage().instance()
+        let invoice = env.storage().persistent()
             .get(&DataKey::Invoice(id))
-            .unwrap_or_else(|| panic!("InvoiceNotFound"))
+            .unwrap_or_else(|| panic!("InvoiceNotFound"));
+            
+        // Extend TTL on access
+        env.storage().persistent().extend_ttl(&DataKey::Invoice(id), 535_680, 535_680);
+        
+        invoice
 }
     
     // 3. REPAY: Mark the invoice as paid
     pub fn repay(env: Env, id: u64) {
-        let mut invoice: Invoice = env.storage().instance().get(&DataKey::Invoice(id)).expect("Invoice not found");
+        let mut invoice: Invoice = env.storage().persistent().get(&DataKey::Invoice(id)).expect("Invoice not found");
         
         invoice.owner.require_auth(); // Only the owner can repay
 
         // (In a real app, we would transfer USDC here. For MVP, we just flip the switch.)
         invoice.is_repaid = true;
 
-        env.storage().instance().set(&DataKey::Invoice(id), &invoice);
-        Self::extend_storage_ttl(&env);
+        env.storage().persistent().set(&DataKey::Invoice(id), &invoice);
+        env.storage().persistent().extend_ttl(&DataKey::Invoice(id), 535_680, 535_680);
+        Self::extend_instance_ttl(&env);
         
         env.events().publish((symbol_short!("repay"), invoice.owner), id);
     }
