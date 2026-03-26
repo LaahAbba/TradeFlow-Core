@@ -3,7 +3,7 @@ use soroban_sdk::{
     token,
 };
 use crate::{
-    TradeFlow, LiquidityPosition, PendingFeeChange, PermitData, DataKey,
+    TradeFlow, LiquidityPosition, PendingFeeChange, PermitData, DataKey, TWAPConfig, PriceObservation,
     utils::fixed_point::{self, Q64},
 };
 
@@ -242,4 +242,153 @@ fn test_user_nonce_increment() {
     // Note: In a real test, you'd need to mint tokens to the user first
     TradeFlow::provide_liquidity(&env, user.clone(), 100, 200, 1);
     assert_eq!(TradeFlow::get_user_nonce(&env, user.clone()), 0);
+}
+
+#[test]
+fn test_twap_config_initialization() {
+    let env = Env::default();
+    env.mock_all_auths();
+    
+    let admin = Address::generate(&env);
+    let token_a = Address::generate(&env);
+    let token_b = Address::generate(&env);
+    
+    TradeFlow::init(&env, admin.clone(), token_a, token_b, 30);
+    
+    // Check default TWAP configuration
+    let config = TradeFlow::get_twap_config(&env);
+    assert_eq!(config.window_size, 3600); // 1 hour
+    assert_eq!(config.max_deviation, 1000); // 10%
+    assert_eq!(config.enabled, true);
+}
+
+#[test]
+fn test_twap_config_update() {
+    let env = Env::default();
+    env.mock_all_auths();
+    
+    let admin = Address::generate(&env);
+    let token_a = Address::generate(&env);
+    let token_b = Address::generate(&env);
+    
+    TradeFlow::init(&env, admin.clone(), token_a, token_b, 30);
+    
+    // Update TWAP configuration
+    TradeFlow::set_twap_config(&env, Some(7200), Some(500), Some(false));
+    
+    let config = TradeFlow::get_twap_config(&env);
+    assert_eq!(config.window_size, 7200); // 2 hours
+    assert_eq!(config.max_deviation, 500); // 5%
+    assert_eq!(config.enabled, false);
+}
+
+#[test]
+fn test_price_observation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    
+    let admin = Address::generate(&env);
+    let token_a = Address::generate(&env);
+    let token_b = Address::generate(&env);
+    
+    TradeFlow::init(&env, admin.clone(), token_a.clone(), token_b.clone(), 30);
+    
+    // Add some liquidity to create price observations
+    let user = Address::generate(&env);
+    
+    // Mock token contracts for liquidity provision
+    let token_a_client = token::Client::new(&env, &token_a);
+    let token_b_client = token::Client::new(&env, &token_b);
+    
+    // Mint tokens to user (in a real scenario, this would be done by token contracts)
+    token_a_client.mint(&user, &1000);
+    token_b_client.mint(&user, &2000);
+    
+    // Provide liquidity
+    TradeFlow::provide_liquidity(&env, user.clone(), 100, 200, 1);
+    
+    // Check that price observation was created
+    let last_observation: Option<PriceObservation> = env.storage().instance()
+        .get(&DataKey::LastObservation);
+    
+    assert!(last_observation.is_some(), "Price observation should be created after providing liquidity");
+    
+    let obs = last_observation.unwrap();
+    assert!(obs.timestamp > 0, "Timestamp should be set");
+    assert!(obs.price_a_per_b > 0, "Price should be calculated");
+    assert!(obs.price_b_per_a > 0, "Price should be calculated");
+}
+
+#[test]
+fn test_twap_slippage_protection() {
+    let env = Env::default();
+    env.mock_all_auths();
+    
+    let admin = Address::generate(&env);
+    let token_a = Address::generate(&env);
+    let token_b = Address::generate(&env);
+    
+    TradeFlow::init(&env, admin.clone(), token_a.clone(), token_b.clone(), 30);
+    
+    // Add liquidity
+    let user = Address::generate(&env);
+    let token_a_client = token::Client::new(&env, &token_a);
+    let token_b_client = token::Client::new(&env, &token_b);
+    
+    token_a_client.mint(&user, &1000);
+    token_b_client.mint(&user, &2000);
+    
+    TradeFlow::provide_liquidity(&env, user.clone(), 100, 200, 1);
+    
+    // Test normal swap (should pass)
+    token_a_client.mint(&user, &10);
+    
+    // This should work as it's a normal sized swap
+    let result = std::panic::catch_unwind(|| {
+        TradeFlow::swap(&env, user.clone(), token_a.clone(), 10, 1);
+    });
+    
+    // The swap should succeed (no panic)
+    assert!(result.is_ok(), "Normal swap should succeed");
+    
+    // Test with disabled TWAP protection
+    TradeFlow::set_twap_config(&env, None, None, Some(false));
+    
+    let result2 = std::panic::catch_unwind(|| {
+        TradeFlow::swap(&env, user.clone(), token_a.clone(), 10, 1);
+    });
+    
+    // Should still succeed when protection is disabled
+    assert!(result2.is_ok(), "Swap should succeed when TWAP protection is disabled");
+}
+
+#[test]
+fn test_twap_config_validation() {
+    let env = Env::default();
+    env.mock_all_auths();
+    
+    let admin = Address::generate(&env);
+    let token_a = Address::generate(&env);
+    let token_b = Address::generate(&env);
+    
+    TradeFlow::init(&env, admin.clone(), token_a, token_b, 30);
+    
+    // Test partial updates
+    TradeFlow::set_twap_config(&env, Some(1800), None, None);
+    let config = TradeFlow::get_twap_config(&env);
+    assert_eq!(config.window_size, 1800);
+    assert_eq!(config.max_deviation, 1000); // unchanged
+    assert_eq!(config.enabled, true); // unchanged
+    
+    TradeFlow::set_twap_config(&env, None, Some(2000), None);
+    let config = TradeFlow::get_twap_config(&env);
+    assert_eq!(config.window_size, 1800); // unchanged
+    assert_eq!(config.max_deviation, 2000);
+    assert_eq!(config.enabled, true); // unchanged
+    
+    TradeFlow::set_twap_config(&env, None, None, Some(false));
+    let config = TradeFlow::get_twap_config(&env);
+    assert_eq!(config.window_size, 1800); // unchanged
+    assert_eq!(config.max_deviation, 2000); // unchanged
+    assert_eq!(config.enabled, false);
 }
