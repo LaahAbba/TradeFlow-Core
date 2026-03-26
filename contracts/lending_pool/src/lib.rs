@@ -22,8 +22,9 @@ pub enum Error {
     CannotLiquidateHealthyLoan = 8,
     Unauthorized = 9,
     MathOverflow = 10,
-    EmptyPool = 11,
-    TradeSizeTooLarge = 12,
+    PoolIsPaused = 11,
+    EmptyPool = 12,
+    TradeSizeTooLarge = 13,
 }
 
 #[contracttype]
@@ -166,7 +167,9 @@ impl LendingPool {
 
     // 3. SWAP / BORROW: Withdraw/Borrow against an invoice (Simplified with max trade protection)
     pub fn swap(env: Env, user: Address, amount_in: i128) -> Result<(), Error> {
-        Self::check_paused(&env);
+        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+            return Err(Error::PoolIsPaused);
+        }
         user.require_auth();
 
         // 1. Check total pool reserves
