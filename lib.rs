@@ -10,6 +10,7 @@ pub struct Pool {
     pub address: Address,
     pub token_a: Address,
     pub token_b: Address,
+    pub fee_tier: u32, // Fee tier in basis points (5, 30, or 100)
     pub paused: bool,
 }
 
@@ -64,24 +65,33 @@ impl FactoryContract {
         pools.get(sorted_tokens).map(|p| p.address)
     }
 
-    /// Deploys a new liquidity pool for the given token pair.
+    /// Deploys a new liquidity pool for the given token pair with a specific fee tier.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `token_a` - The first token address.
     /// * `token_b` - The second token address.
+    /// * `fee_tier` - The fee tier in basis points (5, 30, or 100).
     ///
     /// # Returns
     /// The address of the newly deployed pool.
-    pub fn create_pool(env: Env, token_a: Address, token_b: Address) -> Address {
+    ///
+    /// # Panics
+    /// If tokens are the same, pool already exists, or fee_tier is invalid.
+    pub fn create_pool(env: Env, token_a: Address, token_b: Address, fee_tier: u32) -> Address {
         if token_a == token_b {
             panic!("Tokens must be different");
+        }
+
+        // Validate fee tier - only allow 5, 30, or 100 basis points
+        if fee_tier != 5 && fee_tier != 30 && fee_tier != 100 {
+            panic!("Invalid fee tier. Only 5, 30, or 100 basis points are supported");
         }
 
         let (token_0, token_1) = Self::sort_tokens(token_a, token_b);
 
         let mut pools: Map<(Address, Address), Pool> =
-            env.storage().instance().get(&DataKey::Pools).unwrap_or(Map::new(&env));
+            env.storage().instance().get(&DataKey::Pools).unwrap_or_else(|| Map::new(&env));
 
         if pools.contains_key((token_0.clone(), token_1.clone())) {
             panic!("Pool already exists");
@@ -100,11 +110,21 @@ impl FactoryContract {
         // Deploy the new pool contract
         let pool_address = env.deployer().with_current_contract(salt).deploy(wasm_hash);
 
+        // Initialize the pool with the fee tier
+        let init_args = vec![&env, 
+            env.current_contract_address().into_val(&env), // Factory as admin
+            token_0.clone().into_val(&env), 
+            token_1.clone().into_val(&env),
+            fee_tier.into_val(&env)
+        ];
+        env.invoke_contract::<()>(&pool_address, &Symbol::new(&env, "init"), init_args);
+
         // Store the new pool
         let pool = Pool {
             address: pool_address.clone(),
             token_a: token_0.clone(),
             token_b: token_1.clone(),
+            fee_tier,
             paused: false,
         };
 
