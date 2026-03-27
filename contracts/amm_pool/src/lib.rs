@@ -198,4 +198,18 @@ impl AmmPool {
 
         output_native
     }
+
+    /// Read the current pool reserve ratio (reserve_a / reserve_b) scaled by 10^7.
+    pub fn get_spot_price(env: Env) -> u128 {
+        let state: PoolState = env.storage().instance().get(&DataKey::State).expect("Not initialized");
+        
+        if state.reserve_b == 0 {
+            panic!("reserve_b is zero");
+        }
+
+        let reserve_a = state.reserve_a as u128;
+        let reserve_b = state.reserve_b as u128;
+
+        reserve_a.saturating_mul(10_000_000) / reserve_b
+    }
 }
