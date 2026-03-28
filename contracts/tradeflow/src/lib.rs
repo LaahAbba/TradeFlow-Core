@@ -57,6 +57,24 @@ pub struct BuybackConfig {
 
 #[contracttype]
 #[derive(Clone, Debug)]
+pub struct UpgradeConfig {
+    pub upgrade_delay: u64, // Time delay for upgrades (default: 7 days)
+    pub pending_upgrade: Option<PendingUpgrade>, // Currently pending upgrade
+    pub last_upgrade_time: u64, // Timestamp of last successful upgrade
+    pub upgrade_count: u64, // Total number of upgrades performed
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PendingUpgrade {
+    pub new_wasm_hash: BytesN<32>, // New contract WASM hash
+    pub proposed_time: u64, // When upgrade was proposed
+    pub effective_time: u64, // When upgrade becomes effective
+    pub proposed_by: Address, // Who proposed the upgrade
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
 pub struct FeeAccumulator {
     pub token_a_fees: u128, // Accumulated fees in token A
     pub token_b_fees: u128, // Accumulated fees in token B
@@ -145,6 +163,15 @@ impl TradeFlow {
             total_tokens_burned: 0u128,
         };
         env.storage().instance().set(&DataKey::FeeAccumulator, &fee_accumulator);
+        
+        // Initialize upgrade configuration
+        let upgrade_config = UpgradeConfig {
+            upgrade_delay: 7 * 24 * 60 * 60, // 7 days in seconds
+            pending_upgrade: None,
+            last_upgrade_time: env.ledger().timestamp(),
+            upgrade_count: 0,
+        };
+        env.storage().instance().set(&DataKey::UpgradeConfig, &upgrade_config);
         
         env.events().publish(
             (Symbol::new(&env, "initialized"), admin),
@@ -1030,6 +1057,186 @@ impl TradeFlow {
         env.events().publish(
             (Symbol::new(&env, "buyback_toggled"), enabled),
             env.ledger().timestamp()
+        );
+    }
+    
+    // PROPOSE UPGRADE: Propose a contract upgrade (admin only)
+    pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        Self::require_admin(&env);
+        
+        let current_time = env.ledger().timestamp();
+        let mut upgrade_config: UpgradeConfig = env.storage().instance().get(&DataKey::UpgradeConfig)
+            .expect("Upgrade config not initialized");
+        
+        // Check if there's already a pending upgrade
+        if upgrade_config.pending_upgrade.is_some() {
+            panic!("Upgrade already pending");
+        }
+        
+        // Calculate effective time (current time + delay)
+        let effective_time = current_time.checked_add(upgrade_config.upgrade_delay)
+            .unwrap_or_else(|| panic!("Time overflow in upgrade delay"));
+        
+        let admin_address: Address = env.storage().instance().get(&DataKey::Admin)
+            .expect("Not initialized");
+        
+        let pending_upgrade = PendingUpgrade {
+            new_wasm_hash,
+            proposed_time: current_time,
+            effective_time,
+            proposed_by: admin_address,
+        };
+        
+        upgrade_config.pending_upgrade = Some(pending_upgrade.clone());
+        env.storage().instance().set(&DataKey::UpgradeConfig, &upgrade_config);
+        
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_proposed"), new_wasm_hash),
+            (effective_time, admin_address)
+        );
+    }
+    
+    // EXECUTE UPGRADE: Execute a proposed contract upgrade (admin only)
+    pub fn execute_upgrade(env: Env) {
+        Self::require_admin(&env);
+        
+        let current_time = env.ledger().timestamp();
+        let mut upgrade_config: UpgradeConfig = env.storage().instance().get(&DataKey::UpgradeConfig)
+            .expect("Upgrade config not initialized");
+        
+        let pending_upgrade = upgrade_config.pending_upgrade
+            .take()
+            .expect("No pending upgrade");
+        
+        // Check if upgrade delay has passed
+        if current_time < pending_upgrade.effective_time {
+            panic!("Upgrade delay not met");
+        }
+        
+        // Store old WASM hash for event
+        let old_wasm_hash = env.current_contract_address().contract_id();
+        
+        // Execute the upgrade using Soroban's native upgrade function
+        env.deployer().update_current_contract_wasm(pending_upgrade.new_wasm_hash);
+        
+        // Update upgrade configuration
+        upgrade_config.last_upgrade_time = current_time;
+        upgrade_config.upgrade_count = upgrade_config.upgrade_count.checked_add(1)
+            .unwrap_or_else(|| panic!("Upgrade count overflow"));
+        upgrade_config.pending_upgrade = None;
+        env.storage().instance().set(&DataKey::UpgradeConfig, &upgrade_config);
+        
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_executed"), pending_upgrade.new_wasm_hash),
+            (old_wasm_hash, current_time, upgrade_config.upgrade_count)
+        );
+    }
+    
+    // CANCEL UPGRADE: Cancel a pending upgrade (admin only)
+    pub fn cancel_upgrade(env: Env) {
+        Self::require_admin(&env);
+        
+        let mut upgrade_config: UpgradeConfig = env.storage().instance().get(&DataKey::UpgradeConfig)
+            .expect("Upgrade config not initialized");
+        
+        let pending_upgrade = upgrade_config.pending_upgrade.take()
+            .expect("No pending upgrade");
+        
+        env.storage().instance().set(&DataKey::UpgradeConfig, &upgrade_config);
+        
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_cancelled"), pending_upgrade.new_wasm_hash),
+            (env.ledger().timestamp(), pending_upgrade.proposed_by)
+        );
+    }
+    
+    // SET UPGRADE DELAY: Update the upgrade delay period (admin only)
+    pub fn set_upgrade_delay(env: Env, new_delay: u64) {
+        Self::require_admin(&env);
+        
+        if new_delay < 24 * 60 * 60 {
+            panic!("Upgrade delay must be at least 24 hours");
+        }
+        
+        if new_delay > 30 * 24 * 60 * 60 {
+            panic!("Upgrade delay cannot exceed 30 days");
+        }
+        
+        let mut upgrade_config: UpgradeConfig = env.storage().instance().get(&DataKey::UpgradeConfig)
+            .expect("Upgrade config not initialized");
+        
+        let old_delay = upgrade_config.upgrade_delay;
+        upgrade_config.upgrade_delay = new_delay;
+        env.storage().instance().set(&DataKey::UpgradeConfig, &upgrade_config);
+        
+        env.events().publish(
+            (Symbol::new(&env, "upgrade_delay_updated"), old_delay),
+            (new_delay, env.ledger().timestamp())
+        );
+    }
+    
+    // GET UPGRADE CONFIG: Get current upgrade configuration
+    pub fn get_upgrade_config(env: Env) -> UpgradeConfig {
+        env.storage().instance().get(&DataKey::UpgradeConfig)
+            .expect("Upgrade config not initialized")
+    }
+    
+    // GET PENDING UPGRADE: Get currently pending upgrade (if any)
+    pub fn get_pending_upgrade(env: Env) -> Option<PendingUpgrade> {
+        let upgrade_config: UpgradeConfig = env.storage().instance().get(&DataKey::UpgradeConfig)
+            .expect("Upgrade config not initialized");
+        upgrade_config.pending_upgrade
+    }
+    
+    // UPGRADE CONTRACT: Direct contract upgrade function (admin only)
+    pub fn upgrade_contract(env: Env, new_wasm_hash: BytesN<32>) {
+        // Get admin address and require authentication
+        let admin: Address = env.storage().instance().get(&DataKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+        
+        // Store old WASM hash for event logging
+        let old_wasm_hash = env.current_contract_address().contract_id();
+        
+        // Execute the upgrade using Soroban's native upgrade function
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        
+        // Emit ContractUpgraded event with old and new WASM hashes
+        env.events().publish(
+            (Symbol::new(&env, "ContractUpgraded"), admin),
+            (old_wasm_hash, new_wasm_hash)
+        );
+    }
+    
+    // EMERGENCY UPGRADE: Execute upgrade immediately in emergency (admin only)
+    pub fn emergency_upgrade(env: Env, new_wasm_hash: BytesN<32>, reason: Symbol) {
+        Self::require_admin(&env);
+        
+        // This function bypasses the delay for critical security fixes
+        // Should be used only in emergency situations
+        
+        let current_time = env.ledger().timestamp();
+        let mut upgrade_config: UpgradeConfig = env.storage().instance().get(&DataKey::UpgradeConfig)
+            .expect("Upgrade config not initialized");
+        
+        // Clear any pending upgrade
+        upgrade_config.pending_upgrade = None;
+        
+        // Store old WASM hash for event
+        let old_wasm_hash = env.current_contract_address().contract_id();
+        
+        // Execute the upgrade immediately
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        
+        // Update upgrade configuration
+        upgrade_config.last_upgrade_time = current_time;
+        upgrade_config.upgrade_count = upgrade_config.upgrade_count.checked_add(1)
+            .unwrap_or_else(|| panic!("Upgrade count overflow"));
+        env.storage().instance().set(&DataKey::UpgradeConfig, &upgrade_config);
+        
+        env.events().publish(
+            (Symbol::new(&env, "emergency_upgrade"), new_wasm_hash),
+            (old_wasm_hash, current_time, reason)
         );
     }
 }

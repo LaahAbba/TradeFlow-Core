@@ -2,7 +2,7 @@
 
 ## 📋 Issue Resolution
 
-**Closes #151**: Architecture: Implement an Upgradable Contract Pattern
+**Closes #98**: Implement an Upgradable Contract Pattern
 
 This PR implements a sophisticated upgradable contract pattern that allows for secure, controlled contract upgrades while maintaining state integrity. This critical 200-point tier feature proves TradeFlow is built for long-term Mainnet survival and can address critical bugs without risking user funds.
 
@@ -11,19 +11,20 @@ This PR implements a sophisticated upgradable contract pattern that allows for s
 ## 🏗️ Summary
 
 ### What's Been Implemented
-- **Direct Contract Upgrades**: `upgrade_contract()` function with immediate execution
+- **Time-Delayed Upgrades**: 7-day default delay with configurable range (24h-30d)
 - **Admin-Only Controls**: Secure authorization for all upgrade operations
+- **Emergency Upgrade Capability**: Immediate upgrades for critical security fixes
 - **Comprehensive Event Logging**: Complete audit trail of all upgrade activities
 - **State Preservation**: Soroban native upgrade support maintains all contract data
 - **Safety Validations**: Multiple layers of protection against malicious upgrades
 
 ### Key Features
-✅ **Direct Upgrades** - `upgrade_contract(new_wasm_hash)` for immediate contract updates  
+✅ **Secure Time Delays** - Prevents rushed upgrades with configurable waiting periods  
 ✅ **Admin Authorization** - All upgrade functions require proper admin permissions  
-✅ **Complete Audit Trail** - Every upgrade action logged with old/new WASM hashes  
+✅ **Emergency Procedures** - Bypass delays for critical security fixes  
+✅ **Complete Audit Trail** - Every upgrade action logged and transparent  
 ✅ **State Integrity** - Contract storage preserved during all upgrades  
-✅ **Native Soroban Support** - Uses `env.deployer().update_current_contract_wasm()`  
-✅ **Gas Optimized** - Efficient implementation with minimal overhead  
+✅ **Configurable Parameters** - Flexible delay settings for different scenarios  
 
 ---
 
@@ -31,51 +32,48 @@ This PR implements a sophisticated upgradable contract pattern that allows for s
 
 ### Core Components
 
-#### 1. Main Upgrade Function
+#### 1. Data Structures
 ```rust
-pub fn upgrade_contract(env: Env, new_wasm_hash: BytesN<32>) {
-    // Get admin address and require authentication
-    let admin: Address = env.storage().instance().get(&DataKey::Admin)
-        .expect("Not initialized");
-    admin.require_auth();
-    
-    // Store old WASM hash for event logging
-    let old_wasm_hash = env.current_contract_address().contract_id();
-    
-    // Execute the upgrade using Soroban's native upgrade function
-    env.deployer().update_current_contract_wasm(new_wasm_hash);
-    
-    // Emit ContractUpgraded event with old and new WASM hashes
-    env.events().publish(
-        (Symbol::new(&env, "ContractUpgraded"), admin),
-        (old_wasm_hash, new_wasm_hash)
-    );
+pub struct UpgradeConfig {
+    pub upgrade_delay: u64,           // Time delay for upgrades (default: 7 days)
+    pub pending_upgrade: Option<PendingUpgrade>, // Currently pending upgrade
+    pub last_upgrade_time: u64,       // Timestamp of last successful upgrade
+    pub upgrade_count: u64,            // Total number of upgrades performed
+}
+
+pub struct PendingUpgrade {
+    pub new_wasm_hash: BytesN<32>,  // New contract WASM hash
+    pub proposed_time: u64,           // When upgrade was proposed
+    pub effective_time: u64,          // When upgrade becomes effective
+    pub proposed_by: Address,          // Who proposed the upgrade
 }
 ```
 
-#### 2. Additional Upgrade Features
-- **Time-Delayed Upgrades**: `propose_upgrade()` and `execute_upgrade()` with 7-day default delay
-- **Emergency Upgrades**: `emergency_upgrade()` for critical security fixes
-- **Configuration Management**: `set_upgrade_delay()` for customizable delay periods
+#### 2. Upgrade Functions
+- `propose_upgrade(new_wasm_hash)` - Propose new contract upgrade
+- `execute_upgrade()` - Execute upgrade after delay period
+- `cancel_upgrade()` - Cancel pending upgrade proposal
+- `emergency_upgrade(new_wasm_hash, reason)` - Immediate emergency upgrade
+- `set_upgrade_delay(new_delay)` - Configure upgrade time delay
 
 #### 3. Safety Mechanisms
+- **Time Validation**: Enforces minimum 24h, maximum 30d delays
 - **Authorization Checks**: Admin-only access with proper validation
 - **State Protection**: Soroban preserves all contract storage
-- **Event Logging**: Complete audit trail with old/new WASM hashes
 - **Overflow Protection**: Safe arithmetic throughout all operations
-- **Configuration**: Runtime parameter adjustments by admin
 
 ### Security Architecture
 
 #### Upgrade Flow
-1. **Authorization**: Admin authentication required
-2. **Validation**: Multiple safety checks before execution
-3. **Execution**: Atomic upgrade using Soroban's native function
-4. **Logging**: Complete audit trail with all relevant data
+1. **Proposal**: Admin submits new WASM hash with justification
+2. **Delay Period**: Configurable waiting time for community review
+3. **Validation**: Multiple safety checks before execution
+4. **Execution**: Atomic upgrade using Soroban's native function
+5. **Logging**: Complete audit trail with all relevant data
 
 #### Emergency Protocol
 1. **Critical Issue**: Security vulnerability or critical bug identified
-2. **Immediate Action**: Admin can execute upgrade immediately
+2. **Immediate Action**: Admin can bypass delay for emergency fixes
 3. **Justification**: Reason required for emergency upgrade
 4. **Transparency**: Emergency actions are fully logged and visible
 
@@ -84,14 +82,15 @@ pub fn upgrade_contract(env: Env, new_wasm_hash: BytesN<32>) {
 ## 📊 Security Benefits
 
 ### Protection Mechanisms
+- **Time-Based Security**: Prevents rushed or malicious upgrades
 - **Access Control**: Strict admin-only access controls
 - **State Preservation**: No risk of losing user funds or data
 - **Audit Trail**: Complete transparency for all upgrade activities
 - **Emergency Response**: Rapid response capability for critical issues
 
 ### Risk Mitigation
-- **Admin Authorization**: Only authorized addresses can upgrade
-- **State Safety**: Soroban native upgrade preserves all data
+- **Community Review**: Time delays allow community examination
+- **Rollback Safety**: State preserved if upgrade fails
 - **Multi-Layer Validation**: Multiple security checkpoints
 - **Transparent Governance**: All actions visible and auditable
 
@@ -100,19 +99,23 @@ pub fn upgrade_contract(env: Env, new_wasm_hash: BytesN<32>) {
 ## 🧪 Testing Coverage
 
 ### Unit Tests Added
-- ✅ `upgrade_contract()` function testing
-- ✅ Admin authorization validation
-- ✅ Event emission verification
-- ✅ Non-admin access rejection
-- ✅ Emergency upgrade functionality
+- ✅ Upgrade configuration initialization and validation
+- ✅ Upgrade proposal and pending status tracking
+- ✅ Time delay enforcement and validation
+- ✅ Upgrade execution after delay period
+- ✅ Upgrade cancellation functionality
+- ✅ Emergency upgrade bypass mechanism
 - ✅ Configuration parameter validation
 - ✅ Error handling and edge cases
 
 ### Test Scenarios
-- Direct upgrade execution with proper authorization
-- Event logging with old and new WASM hashes
-- Authorization failure for non-admin users
-- Emergency upgrade bypass mechanism
+- Standard upgrade flow with time delays
+- Emergency upgrade for critical fixes
+- Configuration validation and bounds checking
+- Pending upgrade management and cancellation
+- Authorization and access control testing
+- Overflow protection and safety checks
+
 ---
 
 ## 🔄 Breaking Changes
@@ -120,7 +123,6 @@ pub fn upgrade_contract(env: Env, new_wasm_hash: BytesN<32>) {
 **None** - This is a purely additive feature that maintains full backward compatibility.
 
 ### New Functions (Admin Only)
-- `upgrade_contract(new_wasm_hash)` - Direct contract upgrade
 - `propose_upgrade(new_wasm_hash)` - Propose contract upgrade
 - `execute_upgrade()` - Execute proposed upgrade
 - `cancel_upgrade()` - Cancel pending upgrade
@@ -137,9 +139,20 @@ pub fn upgrade_contract(env: Env, new_wasm_hash: BytesN<32>) {
 
 ### Configuration
 ```rust
-// Direct upgrade process
+// Default configuration (automatically set during initialization)
+UpgradeConfig {
+    upgrade_delay: 7 * 24 * 60 * 60, // 7 days
+    pending_upgrade: None,
+    last_upgrade_time: current_timestamp,
+    upgrade_count: 0,
+}
+
+// Standard upgrade process
 let new_wasm_hash = BytesN::from_array(&env, &new_contract_wasm);
-TradeFlow::upgrade_contract(&env, new_wasm_hash);
+TradeFlow::propose_upgrade(&env, new_wasm_hash);
+
+// After delay period
+TradeFlow::execute_upgrade(&env);
 ```
 
 ### Emergency Usage
@@ -154,9 +167,8 @@ TradeFlow::emergency_upgrade(&env, security_fix_wasm, reason);
 
 ## 📚 Documentation
 
-### Files Updated
-- `contracts/tradeflow/src/lib.rs` - Core implementation
-- `contracts/tradeflow/src/tests.rs` - Comprehensive test suite
+### Files Added
+- `UPGRADEABLE_CONTRACT_DOCUMENTATION.md` - Comprehensive technical documentation
 - Updated inline code documentation
 - Security best practices and governance guidelines
 
@@ -165,12 +177,29 @@ TradeFlow::emergency_upgrade(&env, security_fix_wasm, reason);
 - Upgrade process flows and emergency procedures
 - Configuration examples and usage patterns
 - Safety mechanisms and validation checks
+- Governance integration and transparency features
+
+---
+
+## 🔮 Future Enhancements
+
+### Potential Improvements
+- **Multi-Sig Control**: Require multiple admin approvals
+- **DAO Integration**: Community voting on upgrades
+- **Automatic Rollback**: Safe reversion of failed upgrades
+- **Upgrade Simulation**: Test upgrades before execution
+
+### Governance Features
+- **Proposal System**: Formal upgrade framework
+- **Voting Mechanisms**: Community decision making
+- **Time Lock Options**: Variable delay periods
+- **Transparency Portal**: Upgrade status dashboard
 
 ---
 
 ## 📋 Checklist
 
-- [x] Direct upgrade_contract function implemented
+- [x] Time-delayed upgrade system implemented
 - [x] Admin-only access controls added
 - [x] Emergency upgrade capability created
 - [x] Comprehensive event logging system
