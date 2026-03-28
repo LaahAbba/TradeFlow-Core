@@ -13,8 +13,13 @@ pub struct PoolState {
     pub token_b_decimals: u32,
     pub reserve_a: i128,
     pub reserve_b: i128,
+    pub fee_tier: u32, // Fee tier in basis points (5, 30, or 100)
     pub is_deprecated: bool,
     pub _status: u32, // 0 = unlocked, 1 = locked (reentrancy protection)
+    // TWAP Oracle state variables
+    pub price_0_cumulative_last: u128, // Cumulative price for token_0
+    pub price_1_cumulative_last: u128, // Cumulative price for token_1
+    pub block_timestamp_last: u32,     // Last update timestamp
 }
 
 #[contracttype]
@@ -28,11 +33,12 @@ pub struct AmmPool;
 
 #[contractimpl]
 impl AmmPool {
-    /// Initialize the AMM pool with two tokens and admin.
+    /// Initialize the AMM pool with two tokens, admin, and fee tier.
     /// 1. Queries the Stellar network to fetch exact decimal precision via Soroban token interface.
     /// 2. Validates that both values are positive integers <= 18.
-    /// 3. Aborts initialization if either token's decimals cannot be determined or are invalid.
-    pub fn init(env: Env, admin: Address, token_a: Address, token_b: Address) {
+    /// 3. Validates fee tier is one of the supported values (5, 30, or 100 basis points).
+    /// 4. Aborts initialization if validation fails.
+    pub fn init(env: Env, admin: Address, token_a: Address, token_b: Address, fee_tier: u32) {
         if env.storage().instance().has(&DataKey::State) {
             panic!("Already initialized");
         }
@@ -50,6 +56,11 @@ impl AmmPool {
             panic!("Invalid decimals for token_b");
         }
 
+        // Validate fee tier
+        if fee_tier != 5 && fee_tier != 30 && fee_tier != 100 {
+            panic!("Invalid fee tier. Only 5, 30, or 100 basis points are supported");
+        }
+
         let state = PoolState {
             token_a,
             token_b,
@@ -57,8 +68,13 @@ impl AmmPool {
             token_b_decimals: decimals_b,
             reserve_a: 0,
             reserve_b: 0,
+            fee_tier,
             is_deprecated: false,
             _status: 0, // Start unlocked
+            // Initialize TWAP oracle state
+            price_0_cumulative_last: 0,
+            price_1_cumulative_last: 0,
+            block_timestamp_last: 0,
         };
 
         env.storage().instance().set(&DataKey::State, &state);
@@ -197,5 +213,19 @@ impl AmmPool {
         }
 
         output_native
+    }
+
+    /// Read the current pool reserve ratio (reserve_a / reserve_b) scaled by 10^7.
+    pub fn get_spot_price(env: Env) -> u128 {
+        let state: PoolState = env.storage().instance().get(&DataKey::State).expect("Not initialized");
+        
+        if state.reserve_b == 0 {
+            panic!("reserve_b is zero");
+        }
+
+        let reserve_a = state.reserve_a as u128;
+        let reserve_b = state.reserve_b as u128;
+
+        reserve_a.saturating_mul(10_000_000) / reserve_b
     }
 }
