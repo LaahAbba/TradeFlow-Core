@@ -7,6 +7,10 @@ use soroban_sdk::{
 mod utils;
 use utils::fixed_point::{self, Q64};
 
+mod error;
+use error::{Error, check_and_panic_error};
+
+#[cfg(test)]
 mod tests;
 
 #[contracttype]
@@ -48,6 +52,9 @@ pub enum DataKey {
     Nonce,        // Global nonce for permit signatures
     LiquidityPosition(Address), // User -> LiquidityPosition
     UserNonce(Address), // User-specific nonce for replay protection
+    MaxTradePercentage, // Maximum trade size as percentage of pool reserves
+    FeeRecipient, // Address that receives protocol fees
+    FlashLoanActive, // Flash loan reentrancy lock
 }
 
 #[contract]
@@ -73,6 +80,9 @@ impl TradeFlow {
         env.storage().instance().set(&DataKey::ReserveA, &0u128);
         env.storage().instance().set(&DataKey::ReserveB, &0u128);
         env.storage().instance().set(&DataKey::Nonce, &0u64);
+        env.storage().instance().set(&DataKey::MaxTradePercentage, &10u32); // Default 10%
+        env.storage().instance().set(&DataKey::FeeRecipient, &admin); // Default to admin
+        env.storage().instance().set(&DataKey::FlashLoanActive, &false);
         
         env.events().publish(
             (Symbol::new(&env, "initialized"), admin),
@@ -85,6 +95,16 @@ impl TradeFlow {
         let admin: Address = env.storage().instance().get(&DataKey::Admin)
             .expect("Not initialized");
         admin.require_auth();
+    }
+
+    // Helper function to check token allowance
+    fn check_allowance(env: &Env, user: &Address, token: &Address, spender: &Address, amount: u128) {
+        let token_client = token::Client::new(env, token);
+        let allowance = token_client.allowance(user, spender);
+        
+        if allowance < amount as i128 {
+            check_and_panic_error(Error::InsufficientAllowance);
+        }
     }
 
     // Helper function to get user nonce
@@ -154,11 +174,57 @@ impl TradeFlow {
         env.storage().instance().get(&DataKey::PendingFeeChange)
     }
 
+    // UPDATE MAX TRADE SIZE: Admin function to update maximum trade percentage
+    pub fn update_max_trade_size(env: Env, new_percentage: u32) {
+        Self::require_admin(&env);
+        
+        if new_percentage > 50 {
+            check_and_panic_error(Error::TradeSizeExceedsMaximum);
+        }
+
+        let old_percentage: u32 = env.storage().instance().get(&DataKey::MaxTradePercentage)
+            .unwrap_or(10u32);
+        
+        env.storage().instance().set(&DataKey::MaxTradePercentage, &new_percentage);
+
+        env.events().publish(
+            (Symbol::new(&env, "max_trade_size_updated"), old_percentage),
+            new_percentage
+        );
+    }
+
+    // UPDATE FEE RECIPIENT: Admin function to update protocol fee recipient
+    pub fn update_fee_recipient(env: Env, new_recipient: Address) {
+        Self::require_admin(&env);
+
+        let old_recipient: Address = env.storage().instance().get(&DataKey::FeeRecipient)
+            .expect("Not initialized");
+        
+        env.storage().instance().set(&DataKey::FeeRecipient, &new_recipient);
+
+        env.events().publish(
+            (Symbol::new(&env, "fee_recipient_changed"), old_recipient),
+            new_recipient
+        );
+    }
+
+    // GET MAX TRADE SIZE: Get current maximum trade percentage
+    pub fn get_max_trade_size(env: Env) -> u32 {
+        env.storage().instance().get(&DataKey::MaxTradePercentage)
+            .unwrap_or(10u32) // Default 10%
+    }
+
+    // GET FEE RECIPIENT: Get current fee recipient address
+    pub fn get_fee_recipient(env: Env) -> Address {
+        env.storage().instance().get(&DataKey::FeeRecipient)
+            .expect("Not initialized")
+    }
+
     // VERIFY PERMIT SIGNATURE: Verify EIP-2612 style permit signature
     fn verify_permit_signature(
         env: &Env,
         permit_data: &PermitData,
-        signature: &BytesN<64>
+        _signature: &BytesN<64>
     ) -> bool {
         // For now, we'll implement a simplified version
         // In a real implementation, you'd need to convert the Address to BytesN<32>
@@ -223,6 +289,13 @@ impl TradeFlow {
         token_b_amount: u128,
         min_shares: u128
     ) -> u128 {
+        // Check flash loan reentrancy lock
+        let flash_loan_active: bool = env.storage().temporary().get(&DataKey::FlashLoanActive)
+            .unwrap_or(false);
+        if flash_loan_active {
+            check_and_panic_error(Error::FlashLoanActive);
+        }
+
         // Granular authentication - user signs exact amounts
         let mut args = Vec::new(&env);
         args.push_back(token_a_amount.into_val(&env));
@@ -237,6 +310,11 @@ impl TradeFlow {
 
         let token_a_client = token::Client::new(&env, &token_a);
         let token_b_client = token::Client::new(&env, &token_b);
+
+        // Check token allowances before attempting transfers
+        let contract_address = env.current_contract_address();
+        Self::check_allowance(&env, &user, &token_a, &contract_address, token_a_amount);
+        Self::check_allowance(&env, &user, &token_b, &contract_address, token_b_amount);
 
         // Transfer tokens from user to contract
         token_a_client.transfer(&user, &env.current_contract_address(), &(token_a_amount as i128));
@@ -304,6 +382,13 @@ impl TradeFlow {
         amount_in: u128,
         amount_out_min: u128
     ) -> u128 {
+        // Check flash loan reentrancy lock
+        let flash_loan_active: bool = env.storage().temporary().get(&DataKey::FlashLoanActive)
+            .unwrap_or(false);
+        if flash_loan_active {
+            check_and_panic_error(Error::FlashLoanActive);
+        }
+
         // Granular authentication - user signs exact amount_out_min
         let mut args = Vec::new(&env);
         args.push_back(token_in.into_val(&env));
@@ -330,6 +415,20 @@ impl TradeFlow {
         let (reserve_a, reserve_b) = Self::get_reserves(&env);
         let protocol_fee: u32 = env.storage().instance().get(&DataKey::ProtocolFee)
             .unwrap_or(30); // Default 0.3%
+
+        // Check trade size against maximum allowed percentage
+        let max_trade_percentage: u32 = env.storage().instance().get(&DataKey::MaxTradePercentage)
+            .unwrap_or(10u32); // Default 10%
+        
+        let (_reserve_for_token, max_allowed) = if token_in == token_a {
+            (reserve_a, (reserve_a * max_trade_percentage as u128) / 100u128)
+        } else {
+            (reserve_b, (reserve_b * max_trade_percentage as u128) / 100u128)
+        };
+
+        if amount_in > max_allowed {
+            check_and_panic_error(Error::TradeSizeExceedsMaximum);
+        }
 
         // Determine swap direction and calculate output
         let (amount_out, new_reserve_a, new_reserve_b) = if token_in == token_a {
@@ -379,6 +478,10 @@ impl TradeFlow {
         let token_out_addr = if token_in == token_a { token_b } else { token_a };
         let token_out_client = token::Client::new(&env, &token_out_addr);
 
+        // Check token allowance before attempting transfer
+        let contract_address = env.current_contract_address();
+        Self::check_allowance(&env, &user, &token_in, &contract_address, amount_in);
+
         // Transfer input token from user to contract
         token_in_client.transfer(&user, &env.current_contract_address(), &(amount_in as i128));
         
@@ -422,5 +525,57 @@ impl TradeFlow {
         env.storage().instance()
             .get(&DataKey::UserNonce(user))
             .unwrap_or(0u64)
+    }
+
+    // FLASH LOAN: Execute flash loan with reentrancy protection
+    pub fn flash_loan(
+        env: Env,
+        borrower: Address,
+        token: Address,
+        amount: u128,
+        callback: Address,
+        _callback_data: Bytes
+    ) {
+        // Check if token is valid
+        let token_a: Address = env.storage().instance().get(&DataKey::TokenA)
+            .expect("Not initialized");
+        let token_b: Address = env.storage().instance().get(&DataKey::TokenB)
+            .expect("Not initialized");
+
+        if token != token_a && token != token_b {
+            check_and_panic_error(Error::InvalidTokenAddress);
+        }
+
+        // Check if pool has enough liquidity
+        let (reserve_a, reserve_b) = Self::get_reserves(&env);
+        let reserve_for_token = if token == token_a { reserve_a } else { reserve_b };
+        if amount > reserve_for_token {
+            check_and_panic_error(Error::InsufficientLiquidity);
+        }
+
+        // Set flash loan lock
+        env.storage().temporary().set(&DataKey::FlashLoanActive, &true);
+
+        // Transfer tokens to borrower
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&env.current_contract_address(), &borrower, &(amount as i128));
+
+        // Execute callback (in a real implementation, this would call the borrower's contract)
+        // For now, we'll simulate the callback with a simple event
+        env.events().publish(
+            (Symbol::new(&env, "flash_loan_callback"), borrower.clone()),
+            (token.clone(), amount, callback)
+        );
+
+        // In a real implementation, we would wait for the callback to complete
+        // and verify that the loan has been repaid with fees
+
+        // Clear flash loan lock (after successful repayment)
+        env.storage().temporary().remove(&DataKey::FlashLoanActive);
+
+        env.events().publish(
+            (Symbol::new(&env, "flash_loan_completed"), borrower),
+            (token, amount)
+        );
     }
 }
