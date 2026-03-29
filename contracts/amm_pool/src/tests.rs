@@ -510,3 +510,199 @@ fn test_remove_liquidity_basic() {
     let price = pool.get_spot_price();
     assert_eq!(price, 10_000_000);
 }
+
+// ── Unit tests for Emergency Address Freeze Functionality ────────────────────
+
+/// Admin can freeze an address successfully
+#[test]
+fn test_admin_can_freeze_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (pool, _admin) = create_pool_with_admin(&env);
+    let target = Address::generate(&env);
+    
+    // Initially, address should not be frozen
+    assert!(!pool.is_frozen(&target));
+    
+    // Admin freezes the address
+    pool.set_address_freeze_status(&target, &true);
+    
+    // Now address should be frozen
+    assert!(pool.is_frozen(&target));
+}
+
+/// Admin can unfreeze an address successfully
+#[test]
+fn test_admin_can_unfreeze_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (pool, _admin) = create_pool_with_admin(&env);
+    let target = Address::generate(&env);
+    
+    // Freeze the address first
+    pool.set_address_freeze_status(&target, &true);
+    assert!(pool.is_frozen(&target));
+    
+    // Unfreeze the address
+    pool.set_address_freeze_status(&target, &false);
+    
+    // Address should no longer be frozen
+    assert!(!pool.is_frozen(&target));
+}
+
+/// Frozen address cannot provide liquidity
+#[test]
+fn test_frozen_address_cannot_provide_liquidity() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (pool, _admin) = create_pool_with_admin(&env);
+    let hacker = Address::generate(&env);
+    
+    // Freeze the hacker's address
+    pool.set_address_freeze_status(&hacker, &true);
+    
+    // Attempt to provide liquidity should fail
+    let result = pool.try_provide_liquidity(&hacker, &1_000i128, &1_000i128);
+    assert!(result.is_err(), "provide_liquidity must fail for frozen address");
+}
+
+/// Frozen address cannot execute swaps
+#[test]
+fn test_frozen_address_cannot_swap() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (pool, _admin) = create_pool_with_admin(&env);
+    
+    // Add liquidity first
+    pool.provide_liquidity(&Address::generate(&env), &10_000i128, &10_000i128);
+    
+    let hacker = Address::generate(&env);
+    
+    // Freeze the hacker's address
+    pool.set_address_freeze_status(&hacker, &true);
+    
+    // Attempt to swap should fail
+    let result = pool.try_swap(&hacker, &100i128, &true);
+    assert!(result.is_err(), "swap must fail for frozen address");
+}
+
+/// Frozen address cannot remove liquidity
+#[test]
+fn test_frozen_address_cannot_remove_liquidity() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (pool, _admin) = create_pool_with_admin(&env);
+    
+    let user = Address::generate(&env);
+    
+    // User provides liquidity first
+    pool.provide_liquidity(&user, &5_000i128, &5_000i128);
+    
+    // Admin freezes the user's address
+    pool.set_address_freeze_status(&user, &true);
+    
+    // Attempt to remove liquidity should fail
+    let result = pool.try_remove_liquidity(&user, &1_000i128, &1_000i128);
+    assert!(result.is_err(), "remove_liquidity must fail for frozen address");
+}
+
+/// Non-frozen addresses can still interact normally
+#[test]
+fn test_non_frozen_address_works_normally() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (pool, _admin) = create_pool_with_admin(&env);
+    
+    let hacker = Address::generate(&env);
+    let good_user = Address::generate(&env);
+    
+    // Freeze only the hacker
+    pool.set_address_freeze_status(&hacker, &true);
+    
+    // Good user should be able to provide liquidity
+    pool.provide_liquidity(&good_user, &2_000i128, &2_000i128);
+    
+    // Good user should be able to swap
+    let amount_out = pool.swap(&good_user, &100i128, &true);
+    assert!(amount_out > 0);
+    
+    // Good user should be able to remove liquidity
+    pool.remove_liquidity(&good_user, &100i128, &100i128);
+}
+
+/// Address can be unfrozen and resume operations
+#[test]
+fn test_unfrozen_address_can_resume_operations() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (pool, _admin) = create_pool_with_admin(&env);
+    
+    let user = Address::generate(&env);
+    
+    // Add some initial liquidity
+    pool.provide_liquidity(&Address::generate(&env), &10_000i128, &10_000i128);
+    
+    // Freeze the user
+    pool.set_address_freeze_status(&user, &true);
+    
+    // Verify operations fail
+    assert!(pool.try_provide_liquidity(&user, &100i128, &100i128).is_err());
+    assert!(pool.try_swap(&user, &50i128, &true).is_err());
+    
+    // Unfreeze the user
+    pool.set_address_freeze_status(&user, &false);
+    
+    // Now operations should succeed
+    pool.provide_liquidity(&user, &100i128, &100i128);
+    let amount_out = pool.swap(&user, &50i128, &true);
+    assert!(amount_out > 0);
+    pool.remove_liquidity(&user, &50i128, &50i128);
+}
+
+/// Multiple addresses can be frozen independently
+#[test]
+fn test_multiple_frozen_addresses() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (pool, _admin) = create_pool_with_admin(&env);
+    
+    let hacker1 = Address::generate(&env);
+    let hacker2 = Address::generate(&env);
+    let hacker3 = Address::generate(&env);
+    
+    // Freeze multiple addresses
+    pool.set_address_freeze_status(&hacker1, &true);
+    pool.set_address_freeze_status(&hacker2, &true);
+    pool.set_address_freeze_status(&hacker3, &true);
+    
+    // All should be frozen
+    assert!(pool.is_frozen(&hacker1));
+    assert!(pool.is_frozen(&hacker2));
+    assert!(pool.is_frozen(&hacker3));
+    
+    // Unfreeze one
+    pool.set_address_freeze_status(&hacker2, &false);
+    
+    // Check status
+    assert!(pool.is_frozen(&hacker1));
+    assert!(!pool.is_frozen(&hacker2));
+    assert!(pool.is_frozen(&hacker3));
+}
+
+/// Freeze check respects address equality
+#[test]
+fn test_freeze_is_address_specific() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let (pool, _admin) = create_pool_with_admin(&env);
+    
+    let addr1 = Address::generate(&env);
+    let addr2 = Address::generate(&env);
+    
+    // Freeze only addr1
+    pool.set_address_freeze_status(&addr1, &true);
+    
+    // Only addr1 should be frozen
+    assert!(pool.is_frozen(&addr1));
+    assert!(!pool.is_frozen(&addr2));
+}
