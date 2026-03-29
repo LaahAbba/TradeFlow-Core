@@ -1,4 +1,6 @@
 const express = require('express');
+const helmet = require('helmet');
+const cors = require('cors');
 
 require('dotenv').config();
 
@@ -51,7 +53,11 @@ app.get('/api/transactions', (req, res) => {
     // 3. Slice the array to get the requested chunk
     const paginatedData = transactions.slice(startIndex, endIndex);
 
+});
 
+// Global 404 Not Found handler
+app.use('*', (req, res) => {
+    res.status(404).json({ "error": "Route not found" });
 });
 
 app.listen(port, () => {
