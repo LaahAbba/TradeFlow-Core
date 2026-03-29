@@ -13,8 +13,13 @@ pub struct PoolState {
     pub token_b_decimals: u32,
     pub reserve_a: i128,
     pub reserve_b: i128,
+    pub fee_tier: u32, // Fee tier in basis points (5, 30, or 100)
     pub is_deprecated: bool,
     pub _status: u32, // 0 = unlocked, 1 = locked (reentrancy protection)
+    // TWAP Oracle state variables
+    pub price_0_cumulative_last: u128, // Cumulative price for token_0
+    pub price_1_cumulative_last: u128, // Cumulative price for token_1
+    pub block_timestamp_last: u32,     // Last update timestamp
 }
 
 #[contracttype]
@@ -28,11 +33,12 @@ pub struct AmmPool;
 
 #[contractimpl]
 impl AmmPool {
-    /// Initialize the AMM pool with two tokens and admin.
+    /// Initialize the AMM pool with two tokens, admin, and fee tier.
     /// 1. Queries the Stellar network to fetch exact decimal precision via Soroban token interface.
     /// 2. Validates that both values are positive integers <= 18.
-    /// 3. Aborts initialization if either token's decimals cannot be determined or are invalid.
-    pub fn init(env: Env, admin: Address, token_a: Address, token_b: Address) {
+    /// 3. Validates fee tier is one of the supported values (5, 30, or 100 basis points).
+    /// 4. Aborts initialization if validation fails.
+    pub fn init(env: Env, admin: Address, token_a: Address, token_b: Address, fee_tier: u32) {
         if env.storage().instance().has(&DataKey::State) {
             panic!("Already initialized");
         }
@@ -50,6 +56,11 @@ impl AmmPool {
             panic!("Invalid decimals for token_b");
         }
 
+        // Validate fee tier
+        if fee_tier != 5 && fee_tier != 30 && fee_tier != 100 {
+            panic!("Invalid fee tier. Only 5, 30, or 100 basis points are supported");
+        }
+
         let state = PoolState {
             token_a,
             token_b,
@@ -57,17 +68,26 @@ impl AmmPool {
             token_b_decimals: decimals_b,
             reserve_a: 0,
             reserve_b: 0,
+            fee_tier,
             is_deprecated: false,
             _status: 0, // Start unlocked
+            // Initialize TWAP oracle state
+            price_0_cumulative_last: 0,
+            price_1_cumulative_last: 0,
+            block_timestamp_last: 0,
         };
 
         env.storage().instance().set(&DataKey::State, &state);
         env.storage().instance().set(&DataKey::Admin, &admin);
     }
 
-    /// Provide liquidity (simplified for testing AMM calculations)
-    pub fn provide_liquidity(env: Env, amount_a: i128, amount_b: i128) {
+    /// Provide liquidity after verifying the user holds sufficient balance and allowance
+    /// for both tokens. Call-sites 1 and 2 for verify_balance_and_allowance.
+    pub fn provide_liquidity(env: Env, user: Address, amount_a: i128, amount_b: i128) {
+        user.require_auth();
         let mut state: PoolState = env.storage().instance().get(&DataKey::State).expect("Not initialized");
+        Self::verify_balance_and_allowance(&env, &state.token_a, &user, amount_a);
+        Self::verify_balance_and_allowance(&env, &state.token_b, &user, amount_b);
         state.reserve_a = state.reserve_a.saturating_add(amount_a);
         state.reserve_b = state.reserve_b.saturating_add(amount_b);
         env.storage().instance().set(&DataKey::State, &state);
@@ -77,6 +97,24 @@ impl AmmPool {
     fn require_admin(env: &Env) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Not initialized");
         admin.require_auth();
+    }
+
+    /// Verify that `user` holds at least `required_amount` of `token` and has granted
+    /// at least that much allowance to this contract. Panics early with a descriptive
+    /// message if either check fails. No-ops when `required_amount <= 0`.
+    fn verify_balance_and_allowance(env: &Env, token: &Address, user: &Address, required_amount: i128) {
+        if required_amount <= 0 {
+            return;
+        }
+        let client = token::Client::new(env, token);
+        let balance = client.balance(user);
+        if balance < required_amount {
+            panic!("insufficient balance");
+        }
+        let allowance = client.allowance(user, &env.current_contract_address());
+        if allowance < required_amount {
+            panic!("insufficient allowance");
+        }
     }
 
     /// Emergency eject liquidity - Admin only function to forcefully withdraw all liquidity
@@ -197,5 +235,28 @@ impl AmmPool {
         }
 
         output_native
+    }
+
+    /// Swap tokens: verify user balance/allowance for the input token (call-site 3),
+    /// then calculate and return the output amount using the constant-product formula.
+    /// Does not perform actual token transfers (out of scope for this feature).
+    pub fn swap(env: Env, user: Address, amount_in: i128, is_a_in: bool) -> i128 {
+        let state: PoolState = env.storage().instance().get(&DataKey::State).expect("Not initialized");
+        let input_token = if is_a_in { &state.token_a } else { &state.token_b };
+        Self::verify_balance_and_allowance(&env, input_token, &user, amount_in);
+        Self::calculate_amount_out(env, amount_in, is_a_in)
+    }
+
+    /// Read the current pool reserve ratio (reserve_a / reserve_b) scaled by 10^7.
+    pub fn get_spot_price(env: Env) -> u128 {        let state: PoolState = env.storage().instance().get(&DataKey::State).expect("Not initialized");
+        
+        if state.reserve_b == 0 {
+            panic!("reserve_b is zero");
+        }
+
+        let reserve_a = state.reserve_a as u128;
+        let reserve_b = state.reserve_b as u128;
+
+        reserve_a.saturating_mul(10_000_000) / reserve_b
     }
 }

@@ -1,13 +1,23 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env, Map};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env, Map, Symbol, vec};
 
 mod tests;
 
 #[contracttype]
+#[derive(Clone)]
+pub struct Pool {
+    pub address: Address,
+    pub token_a: Address,
+    pub token_b: Address,
+    pub fee_tier: u32, // Fee tier in basis points (5, 30, or 100)
+    pub paused: bool,
+}
+
+#[contracttype]
 pub enum DataKey {
     FeeTo, // The address that receives protocol fees
-    Pools, // Map of (TokenA, TokenB) -> PoolAddress
+    Pools, // Map of (TokenA, TokenB) -> Pool
     PoolWasmHash, // The Wasm hash of the Pool contract to deploy
     Admin, // The address of the factory admin
 }
@@ -49,30 +59,39 @@ impl FactoryContract {
     /// Returns the address of the liquidity pool for a given pair of tokens.
     pub fn get_pool(env: Env, token_a: Address, token_b: Address) -> Option<Address> {
         let sorted_tokens = Self::sort_tokens(token_a, token_b);
-        let pools: Map<(Address, Address), Address> =
+        let pools: Map<(Address, Address), Pool> =
             env.storage().instance().get(&DataKey::Pools).unwrap_or_else(|| Map::new(&env));
 
-        pools.get(sorted_tokens)
+        pools.get(sorted_tokens).map(|p| p.address)
     }
 
-    /// Deploys a new liquidity pool for the given token pair.
+    /// Deploys a new liquidity pool for the given token pair with a specific fee tier.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `token_a` - The first token address.
     /// * `token_b` - The second token address.
+    /// * `fee_tier` - The fee tier in basis points (5, 30, or 100).
     ///
     /// # Returns
     /// The address of the newly deployed pool.
-    pub fn create_pool(env: Env, token_a: Address, token_b: Address) -> Address {
+    ///
+    /// # Panics
+    /// If tokens are the same, pool already exists, or fee_tier is invalid.
+    pub fn create_pool(env: Env, token_a: Address, token_b: Address, fee_tier: u32) -> Address {
         if token_a == token_b {
             panic!("Tokens must be different");
         }
 
+        // Validate fee tier - only allow 5, 30, or 100 basis points
+        if fee_tier != 5 && fee_tier != 30 && fee_tier != 100 {
+            panic!("Invalid fee tier. Only 5, 30, or 100 basis points are supported");
+        }
+
         let (token_0, token_1) = Self::sort_tokens(token_a, token_b);
 
-        let mut pools: Map<(Address, Address), Address> =
-            env.storage().instance().get(&DataKey::Pools).unwrap_or(Map::new(&env));
+        let mut pools: Map<(Address, Address), Pool> =
+            env.storage().instance().get(&DataKey::Pools).unwrap_or_else(|| Map::new(&env));
 
         if pools.contains_key((token_0.clone(), token_1.clone())) {
             panic!("Pool already exists");
@@ -91,8 +110,25 @@ impl FactoryContract {
         // Deploy the new pool contract
         let pool_address = env.deployer().with_current_contract(salt).deploy(wasm_hash);
 
+        // Initialize the pool with the fee tier
+        let init_args = vec![&env, 
+            env.current_contract_address().into_val(&env), // Factory as admin
+            token_0.clone().into_val(&env), 
+            token_1.clone().into_val(&env),
+            fee_tier.into_val(&env)
+        ];
+        env.invoke_contract::<()>(&pool_address, &Symbol::new(&env, "init"), init_args);
+
         // Store the new pool
-        pools.set((token_0, token_1), pool_address.clone());
+        let pool = Pool {
+            address: pool_address.clone(),
+            token_a: token_0.clone(),
+            token_b: token_1.clone(),
+            fee_tier,
+            paused: false,
+        };
+
+        pools.set((token_0, token_1), pool);
         env.storage().instance().set(&DataKey::Pools, &pools);
 
         pool_address
@@ -125,22 +161,29 @@ impl FactoryContract {
     /// * `token_a` - The first token of the pair.
     /// * `token_b` - The second token of the pair.
     /// * `status` - The new status (e.g., 0 = Paused, 1 = Active).
-    pub fn toggle_pool_status(env: Env, token_a: Address, token_b: Address, status: u32) {
+    pub fn toggle_pool_status(env: Env, token_a: Address, token_b: Address) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Not initialized");
         admin.require_auth();
 
-        // Verify pool exists
-        let pool_addr = Self::get_pool(env.clone(), token_a.clone(), token_b.clone());
-        if pool_addr.is_none() {
-            panic!("Pool does not exist");
-        }
+        let sorted_tokens = Self::sort_tokens(token_a.clone(), token_b.clone());
+        let mut pools: Map<(Address, Address), Pool> =
+            env.storage().instance().get(&DataKey::Pools).unwrap_or_else(|| Map::new(&env));
 
-        // Emit event: ("Admin", "PoolStatus", token_a, token_b) -> status
-        // Note: The factory doesn't store the status locally in this implementation,
-        // but emits the event for indexers and transparency.
+        let mut pool = pools.get(sorted_tokens.clone()).expect("Pool does not exist");
+        
+        // Toggle the paused state
+        pool.paused = !pool.paused;
+        
+        // Invoke the pool contract to update its internal pause state
+        let args = vec![&env, pool.paused.into()];
+        env.invoke_contract::<()>(&pool.address, &Symbol::new(&env, "set_paused"), args);
+
+        pools.set(sorted_tokens, pool.clone());
+        env.storage().instance().set(&DataKey::Pools, &pools);
+
         env.events().publish(
             (symbol_short!("Admin"), symbol_short!("PoolStatus"), token_a, token_b),
-            status
+            pool.paused
         );
     }
 }

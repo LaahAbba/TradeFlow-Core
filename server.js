@@ -1,8 +1,15 @@
 const express = require('express');
+const helmet = require('helmet');
+const cors = require('cors');
 
 require('dotenv').config();
 
 const app = express();
+
+// Startup validation for required .env variables (#25)
+if (!process.env.PORT) {
+    console.warn('Warning: PORT is not defined in .env file. Falling back to default port 3000.');
+}
 const port = process.env.PORT || 3000;
 
 // Security and middleware
@@ -46,7 +53,11 @@ app.get('/api/transactions', (req, res) => {
     // 3. Slice the array to get the requested chunk
     const paginatedData = transactions.slice(startIndex, endIndex);
 
+});
 
+// Global 404 Not Found handler
+app.use('*', (req, res) => {
+    res.status(404).json({ "error": "Route not found" });
 });
 
 app.listen(port, () => {
