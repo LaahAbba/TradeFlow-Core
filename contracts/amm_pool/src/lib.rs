@@ -28,6 +28,7 @@ pub struct PoolState {
 pub enum DataKey {
     State,
     Admin,
+    FrozenAddress(Address),
 }
 
 #[contract]
@@ -89,6 +90,7 @@ impl AmmPool {
     /// for both tokens. Call-sites 1 and 2 for verify_balance_and_allowance.
     pub fn provide_liquidity(env: Env, user: Address, amount_a: i128, amount_b: i128) {
         user.require_auth();
+        Self::require_not_frozen(&env, &user);
         let mut state: PoolState = env.storage().instance().get(&DataKey::State).expect("Not initialized");
         if state.deposits_paused {
             panic!("deposits are paused");
@@ -104,6 +106,42 @@ impl AmmPool {
     fn require_admin(env: &Env) {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).expect("Not initialized");
         admin.require_auth();
+    }
+
+    /// Helper function to check if an address is frozen
+    fn is_address_frozen(env: &Env, address: &Address) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::FrozenAddress(address.clone()))
+            .unwrap_or(false)
+    }
+
+    /// Helper function to require address is not frozen
+    fn require_not_frozen(env: &Env, address: &Address) {
+        if Self::is_address_frozen(env, address) {
+            panic!("address is frozen");
+        }
+    }
+
+    /// Admin-only function to freeze or unfreeze a specific address.
+    /// When an address is frozen, it cannot execute swaps, provide liquidity, or remove liquidity.
+    /// This is an emergency measure for compliance and security against known malicious actors.
+    pub fn set_address_freeze_status(env: Env, address: Address, frozen: bool) {
+        Self::require_admin(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::FrozenAddress(address.clone()), &frozen);
+        
+        // Emit event for transparency
+        env.events().publish(
+            (symbol_short!("Freeze"), symbol_short!("Status")),
+            (address, frozen)
+        );
+    }
+
+    /// Query function to check if an address is currently frozen
+    pub fn is_frozen(env: Env, address: Address) -> bool {
+        Self::is_address_frozen(&env, &address)
     }
 
     /// Admin: pause or unpause new deposits and swaps into the pool.
@@ -268,6 +306,7 @@ impl AmmPool {
     /// then calculate and return the output amount using the constant-product formula.
     /// Does not perform actual token transfers (out of scope for this feature).
     pub fn swap(env: Env, user: Address, amount_in: i128, is_a_in: bool) -> i128 {
+        Self::require_not_frozen(&env, &user);
         let state: PoolState = env.storage().instance().get(&DataKey::State).expect("Not initialized");
         if state.deposits_paused {
             panic!("deposits are paused");
@@ -283,6 +322,7 @@ impl AmmPool {
     /// (set by admin) can block this function.
     pub fn remove_liquidity(env: Env, user: Address, amount_a: i128, amount_b: i128) {
         user.require_auth();
+        Self::require_not_frozen(&env, &user);
         let mut state: PoolState = env.storage().instance().get(&DataKey::State).expect("Not initialized");
         if state.withdrawals_paused {
             panic!("withdrawals are paused");
