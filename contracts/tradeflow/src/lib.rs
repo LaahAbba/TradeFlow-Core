@@ -1,21 +1,13 @@
-#![no_std]
 use soroban_sdk::{
     contract, contractimpl, contracttype, 
-    token, Address, Env, Symbol, Map, BytesN, Vec, Val, IntoVal, Bytes
+    token, Address, Env, Symbol, BytesN, Vec, Val, IntoVal
 };
 
 mod utils;
-use utils::fixed_point::{self, Q64};
+use utils::fixed_point;
 
 mod error;
-use error::{Error, check_and_panic_error};
-
-#[cfg(test)]
-mod tests;
-
-const MINIMUM_LIQUIDITY: u128 = 1000;
-
-const BURN_ADDRESS: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+use error::{TradeFlowError, check_and_panic_error};
 
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -61,11 +53,27 @@ pub struct BuybackConfig {
 
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct UpgradeConfig {
-    pub upgrade_delay: u64, // Time delay for upgrades (default: 7 days)
-    pub pending_upgrade: Option<PendingUpgrade>, // Currently pending upgrade
-    pub last_upgrade_time: u64, // Timestamp of last successful upgrade
-    pub upgrade_count: u64, // Total number of upgrades performed
+pub enum PendingUpgradeStatus {
+    None,
+    Some(PendingUpgrade),
+}
+
+impl PendingUpgradeStatus {
+    pub fn is_some(&self) -> bool {
+        match self {
+            PendingUpgradeStatus::Some(_) => true,
+            PendingUpgradeStatus::None => false,
+        }
+    }
+    pub fn is_none(&self) -> bool {
+        !self.is_some()
+    }
+    pub fn unwrap(self) -> PendingUpgrade {
+        match self {
+            PendingUpgradeStatus::Some(u) => u,
+            PendingUpgradeStatus::None => panic!("unwrap on None"),
+        }
+    }
 }
 
 #[contracttype]
@@ -75,6 +83,15 @@ pub struct PendingUpgrade {
     pub proposed_time: u64, // When upgrade was proposed
     pub effective_time: u64, // When upgrade becomes effective
     pub proposed_by: Address, // Who proposed the upgrade
+}
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct UpgradeConfig {
+    pub upgrade_delay: u64, // Time delay for upgrades (default: 7 days)
+    pub pending_upgrade: PendingUpgradeStatus, // Currently pending upgrade
+    pub last_upgrade_time: u64, // Timestamp of last successful upgrade
+    pub upgrade_count: u64, // Total number of upgrades performed
 }
 
 #[contracttype]
@@ -105,6 +122,16 @@ pub struct PermitData {
     pub deadline: u64,
 }
 
+#[cfg(test)]
+mod tests;
+
+const MINIMUM_LIQUIDITY: u128 = 1000;
+
+const BURN_ADDRESS: &str = "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+
+
+
+// Data keys for contract storage
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -125,6 +152,10 @@ pub enum DataKey {
     FeeAccumulator, // Fee accumulation tracking
     DeadManSwitchConfig, // Dead-man's switch configuration
     ReentrancyStatus,    // Reentrancy protection status
+    MaxTradePercentage,
+    FeeRecipient,
+    FlashLoanActive,
+    UpgradeConfig,
 }
 
 #[contract]
@@ -175,7 +206,7 @@ impl TradeFlow {
         // Initialize upgrade configuration
         let upgrade_config = UpgradeConfig {
             upgrade_delay: 7 * 24 * 60 * 60, // 7 days in seconds
-            pending_upgrade: None,
+            pending_upgrade: PendingUpgradeStatus::None,
             last_upgrade_time: env.ledger().timestamp(),
             upgrade_count: 0,
         };
@@ -212,7 +243,7 @@ impl TradeFlow {
         let allowance = token_client.allowance(user, spender);
         
         if allowance < amount as i128 {
-            check_and_panic_error(Error::InsufficientAllowance);
+            check_and_panic_error(TradeFlowError::InsufficientAllowance);
         }
     }
 
@@ -256,11 +287,11 @@ impl TradeFlow {
             
             // Accumulate prices over time
             let new_cumulative_a = last_obs.cumulative_price_a.checked_add(
-                price_a_per_b.checked_mul(time_elapsed).unwrap_or_else(|| panic!("Multiplication overflow"))
+                price_a_per_b.checked_mul(time_elapsed as u128).unwrap_or_else(|| panic!("Multiplication overflow"))
             ).unwrap_or_else(|| panic!("Addition overflow"));
             
             let new_cumulative_b = last_obs.cumulative_price_b.checked_add(
-                price_b_per_a.checked_mul(time_elapsed).unwrap_or_else(|| panic!("Multiplication overflow"))
+                price_b_per_a.checked_mul(time_elapsed as u128).unwrap_or_else(|| panic!("Multiplication overflow"))
             ).unwrap_or_else(|| panic!("Addition overflow"));
             
             (new_cumulative_a, new_cumulative_b)
@@ -294,7 +325,7 @@ impl TradeFlow {
                 enabled: true,
             });
         
-        let cutoff_time = current_timestamp.checked_sub(twap_config.window_size)
+        let _cutoff_time = current_timestamp.checked_sub(twap_config.window_size)
             .unwrap_or(0);
         
         // In a real implementation, you'd iterate through stored observations
@@ -358,7 +389,7 @@ impl TradeFlow {
         }
         
         // Get TWAP price
-        let twap_price = Self::calculate_twap(env, token_in)?;
+        let twap_price = Self::calculate_twap(env, token_in.clone())?;
         
         // Calculate current spot price from the swap
         let (reserve_a, reserve_b) = Self::get_reserves(env);
@@ -535,7 +566,7 @@ impl TradeFlow {
         Self::require_admin(&env);
         
         if new_percentage > 50 {
-            check_and_panic_error(Error::TradeSizeExceedsMaximum);
+            check_and_panic_error(TradeFlowError::TradeSizeExceedsMaximum);
         }
 
         let old_percentage: u32 = env.storage().instance().get(&DataKey::MaxTradePercentage)
@@ -805,7 +836,7 @@ impl TradeFlow {
         };
 
         if amount_in > max_allowed {
-            check_and_panic_error(Error::TradeSizeExceedsMaximum);
+            check_and_panic_error(TradeFlowError::TradeSizeExceedsMaximum);
         }
 
         // Determine swap direction and calculate output
@@ -867,7 +898,7 @@ impl TradeFlow {
 
         // Execute token transfers
         let token_in_client = token::Client::new(&env, &token_in);
-        let token_out_addr = if token_in == token_a { token_b } else { token_a };
+        let token_out_addr = if token_in == token_a { token_b.clone() } else { token_a.clone() };
         let token_out_client = token::Client::new(&env, &token_out_addr);
 
         // Check token allowance before attempting transfer
@@ -1171,9 +1202,9 @@ impl TradeFlow {
     
     // SIMULATE TF PURCHASE: Simulate buying TF tokens from external DEX
     fn simulate_tf_purchase(
-        env: &Env,
-        stablecoin: Address,
-        stablecoin_amount: u128,
+        _env: &Env,
+        _stablecoin: Address,
+        _stablecoin_amount: u128,
         min_tf_tokens: u128
     ) -> u128 {
         // In a real implementation, this would interact with a DEX like Uniswap
@@ -1242,8 +1273,9 @@ impl TradeFlow {
             .expect("Upgrade config not initialized");
         
         // Check if there's already a pending upgrade
-        if upgrade_config.pending_upgrade.is_some() {
-            panic!("Upgrade already pending");
+        match upgrade_config.pending_upgrade {
+            PendingUpgradeStatus::Some(_) => panic!("Upgrade already pending"),
+            PendingUpgradeStatus::None => (),
         }
         
         // Calculate effective time (current time + delay)
@@ -1254,13 +1286,13 @@ impl TradeFlow {
             .expect("Not initialized");
         
         let pending_upgrade = PendingUpgrade {
-            new_wasm_hash,
+            new_wasm_hash: new_wasm_hash.clone(),
             proposed_time: current_time,
             effective_time,
-            proposed_by: admin_address,
+            proposed_by: admin_address.clone(),
         };
         
-        upgrade_config.pending_upgrade = Some(pending_upgrade.clone());
+        upgrade_config.pending_upgrade = PendingUpgradeStatus::Some(pending_upgrade.clone());
         env.storage().instance().set(&DataKey::UpgradeConfig, &upgrade_config);
         
         env.events().publish(
@@ -1277,9 +1309,11 @@ impl TradeFlow {
         let mut upgrade_config: UpgradeConfig = env.storage().instance().get(&DataKey::UpgradeConfig)
             .expect("Upgrade config not initialized");
         
-        let pending_upgrade = upgrade_config.pending_upgrade
-            .take()
-            .expect("No pending upgrade");
+        let pending_upgrade = match upgrade_config.pending_upgrade {
+            PendingUpgradeStatus::Some(u) => u,
+            PendingUpgradeStatus::None => panic!("No pending upgrade"),
+        };
+        upgrade_config.pending_upgrade = PendingUpgradeStatus::None;
         
         // Check if upgrade delay has passed
         if current_time < pending_upgrade.effective_time {
@@ -1287,16 +1321,16 @@ impl TradeFlow {
         }
         
         // Store old WASM hash for event
-        let old_wasm_hash = env.current_contract_address().contract_id();
+        let old_wasm_hash = BytesN::from_array(&env, &[0; 32]);
         
         // Execute the upgrade using Soroban's native upgrade function
-        env.deployer().update_current_contract_wasm(pending_upgrade.new_wasm_hash);
+        env.deployer().update_current_contract_wasm(pending_upgrade.new_wasm_hash.clone());
         
         // Update upgrade configuration
         upgrade_config.last_upgrade_time = current_time;
         upgrade_config.upgrade_count = upgrade_config.upgrade_count.checked_add(1)
             .unwrap_or_else(|| panic!("Upgrade count overflow"));
-        upgrade_config.pending_upgrade = None;
+        upgrade_config.pending_upgrade = PendingUpgradeStatus::None;
         env.storage().instance().set(&DataKey::UpgradeConfig, &upgrade_config);
         
         env.events().publish(
@@ -1312,8 +1346,11 @@ impl TradeFlow {
         let mut upgrade_config: UpgradeConfig = env.storage().instance().get(&DataKey::UpgradeConfig)
             .expect("Upgrade config not initialized");
         
-        let pending_upgrade = upgrade_config.pending_upgrade.take()
-            .expect("No pending upgrade");
+        let pending_upgrade = match upgrade_config.pending_upgrade {
+            PendingUpgradeStatus::Some(u) => u,
+            PendingUpgradeStatus::None => panic!("No pending upgrade"),
+        };
+        upgrade_config.pending_upgrade = PendingUpgradeStatus::None;
         
         env.storage().instance().set(&DataKey::UpgradeConfig, &upgrade_config);
         
@@ -1358,7 +1395,10 @@ impl TradeFlow {
     pub fn get_pending_upgrade(env: Env) -> Option<PendingUpgrade> {
         let upgrade_config: UpgradeConfig = env.storage().instance().get(&DataKey::UpgradeConfig)
             .expect("Upgrade config not initialized");
-        upgrade_config.pending_upgrade
+        match upgrade_config.pending_upgrade {
+            PendingUpgradeStatus::Some(u) => Some(u),
+            PendingUpgradeStatus::None => None,
+        }
     }
     
     // UPGRADE CONTRACT: Direct contract upgrade function (admin only)
@@ -1369,10 +1409,10 @@ impl TradeFlow {
         admin.require_auth();
         
         // Store old WASM hash for event logging
-        let old_wasm_hash = env.current_contract_address().contract_id();
+        let old_wasm_hash = BytesN::from_array(&env, &[0; 32]);
         
         // Execute the upgrade using Soroban's native upgrade function
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
         
         // Emit ContractUpgraded event with old and new WASM hashes
         env.events().publish(
@@ -1393,13 +1433,13 @@ impl TradeFlow {
             .expect("Upgrade config not initialized");
         
         // Clear any pending upgrade
-        upgrade_config.pending_upgrade = None;
+        upgrade_config.pending_upgrade = PendingUpgradeStatus::None;
         
         // Store old WASM hash for event
-        let old_wasm_hash = env.current_contract_address().contract_id();
+        let old_wasm_hash = BytesN::from_array(&env, &[0; 32]);
         
         // Execute the upgrade immediately
-        env.deployer().update_current_contract_wasm(new_wasm_hash);
+        env.deployer().update_current_contract_wasm(new_wasm_hash.clone());
         
         // Update upgrade configuration
         upgrade_config.last_upgrade_time = current_time;
