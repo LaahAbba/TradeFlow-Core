@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, Env, BytesN, Bytes, symbol_short, Symbol, vec, Val, panic_with_error};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, Env, BytesN, Bytes, symbol_short, Symbol, vec, Val, panic_with_error, IntoVal};
 
 #[cfg(test)]
 mod tests;
@@ -150,7 +150,7 @@ impl LendingPool {
                 panic_with_error!(&env, Error::Unauthorized);
             }
             // Extend TTL for the whitelist entry on access
-            env.storage().persistent().extend_ttl(&DataKey::Whitelisted(from), 535_680, 535_680);
+            env.storage().persistent().extend_ttl(&DataKey::Whitelisted(from.clone()), 535_680, 535_680);
         }
 
         let token_addr: Address = env.storage().instance().get(&DataKey::TokenAddress)
@@ -212,7 +212,7 @@ impl LendingPool {
 
     // Legacy borrow function mapped to swap logic for compatibility
     pub fn borrow(env: Env, borrower: Address, amount: i128) {
-        Self::swap(env, borrower, amount)
+        Self::swap(env.clone(), borrower, amount)
             .unwrap_or_else(|e| panic_with_error!(&env, e));
     }
 

@@ -1,6 +1,7 @@
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
+const { verifyApiKey } = require('./utils/auth');
 
 require('dotenv').config();
 
@@ -53,6 +54,13 @@ app.get('/api/transactions', (req, res) => {
     // 3. Slice the array to get the requested chunk
     const paginatedData = transactions.slice(startIndex, endIndex);
 
+    res.json({
+        data: paginatedData,
+        page,
+        limit,
+        totalCount: transactions.length,
+        totalPages: Math.ceil(transactions.length / limit)
+    });
 });
 
 // Global 404 Not Found handler
